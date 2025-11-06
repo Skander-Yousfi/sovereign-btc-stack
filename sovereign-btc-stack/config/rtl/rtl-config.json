@@ -1,0 +1,15 @@
+{
+  "multiPass": "__RTL_PASSWORD__",
+  "nodes": [
+    {
+      "index": 1,
+      "nodeType": "ECLAIR",
+      "implementation": "Eclair",
+      "lnNode": "My Eclair Node",
+      "host": "eclair:8080",
+      "port": "8080",
+      "password": "__ECLAIR_API_PASSWORD__"
+    }
+  ],
+  "defaultNodeIndex": 1
+}

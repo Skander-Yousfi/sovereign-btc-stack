@@ -1,0 +1,17 @@
+# Security: never commit environment secrets
+.env
+.env.*
+
+# OS / editor noise
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Logs and temp
+*.log
+tmp/
+
+# Docker
+*.pid
+*.sock

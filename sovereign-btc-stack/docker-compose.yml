@@ -1,0 +1,189 @@
+version: "3.9"
+
+services:
+  traefik:
+    image: traefik:v3.0
+    container_name: traefik
+    restart: unless-stopped
+    networks:
+      - sovereign-net
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    command:
+      - "--api.dashboard=true"
+      - "--providers.docker=true"
+      - "--providers.docker.exposedbydefault=false"
+      - "--entrypoints.web.address=:80"
+      - "--entrypoints.websecure.address=:443"
+      - "--certificatesresolvers.le.acme.httpchallenge=true"
+      - "--certificatesresolvers.le.acme.httpchallenge.entrypoint=web"
+      - "--certificatesresolvers.le.acme.email=${LETSENCRYPT_EMAIL}"
+      - "--certificatesresolvers.le.acme.storage=/acme.json"
+    volumes:
+      - traefik_data:/acme.json
+
+  bitcoind:
+    image: ruimarinho/bitcoin-core:latest
+    container_name: bitcoind
+    restart: unless-stopped
+    networks:
+      - sovereign-net
+    environment:
+      BITCOIN_DATA: /home/bitcoin/.bitcoin
+    volumes:
+      - bitcoin_data:/home/bitcoin/.bitcoin
+      - ./config/bitcoin/bitcoin.conf:/home/bitcoin/.bitcoin/bitcoin.conf
+    expose:
+      - "8332"  # RPC
+      - "28332" # ZMQ Block
+      - "28333" # ZMQ Tx
+    ports:
+      - "8333:8333" # P2P
+    healthcheck:
+      test: ["CMD-SHELL", "bitcoin-cli -rpcconnect=127.0.0.1 -rpcuser=${BITCOIN_RPC_USER} -rpcpassword=${BITCOIN_RPC_PASSWORD} getblockchaininfo >/dev/null 2>&1"]
+      interval: 30s
+      timeout: 10s
+      retries: 10
+
+  eclair:
+    image: acinq/eclair:latest
+    container_name: eclair
+    restart: unless-stopped
+    depends_on:
+      - bitcoind
+    networks:
+      - sovereign-net
+    environment:
+      JAVA_OPTS: "-Declair.api.binding-ip=0.0.0.0 -Declair.api.password=${ECLAIR_API_PASSWORD} -Declair.server.password=${ECLAIR_PASSWORD} -Declair.chain=mainnet -Declair.bitcoind.rpcuser=${BITCOIN_RPC_USER} -Declair.bitcoind.rpcpassword=${BITCOIN_RPC_PASSWORD} -Declair.bitcoind.zmqblock=tcp://bitcoind:28332 -Declair.bitcoind.zmqtx=tcp://bitcoind:28333 -Declair.node-alias=${ECLAIR_ALIAS}"
+    volumes:
+      - eclair_data:/data
+    expose:
+      - "8080" # API
+    ports:
+      - "9735:9735" # P2P Lightning
+
+  electrs:
+    image: ghcr.io/romanz/electrs:latest
+    container_name: electrs
+    restart: unless-stopped
+    depends_on:
+      - bitcoind
+    networks:
+      - sovereign-net
+    volumes:
+      - electrs_data:/data
+    command: >-
+      electrs
+      --network bitcoin
+      --daemon-rpc-addr bitcoind:8332
+      --daemon-p2p-addr bitcoind:8333
+      --cookie ${BITCOIN_RPC_USER}:${BITCOIN_RPC_PASSWORD}
+      --db-dir /data
+      --electrum-rpc-addr 0.0.0.0:50001
+    ports:
+      - "50001:50001" # Electrum TCP
+
+  nbxplorer:
+    image: nicolasdorier/nbxplorer:latest
+    container_name: nbxplorer
+    restart: unless-stopped
+    depends_on:
+      - bitcoind
+    networks:
+      - sovereign-net
+    environment:
+      NBXPLORER_NETWORK: ${NETWORK}
+      NBXPLORER_CHAINS: btc
+      NBXPLORER_BTCRPCURL: http://${BITCOIN_RPC_USER}:${BITCOIN_RPC_PASSWORD}@bitcoind:8332/
+      NBXPLORER_BTCHRUNTYPE: BitcoinCore
+    expose:
+      - "32838"
+
+  postgres:
+    image: postgres:15-alpine
+    container_name: postgres
+    restart: unless-stopped
+    networks:
+      - sovereign-net
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    expose:
+      - "5432"
+
+  btcpayserver:
+    image: btcpayserver/btcpayserver:latest
+    container_name: btcpayserver
+    restart: unless-stopped
+    depends_on:
+      - bitcoind
+      - nbxplorer
+      - postgres
+      - traefik
+    networks:
+      - sovereign-net
+    volumes:
+      - btcpay_data:/data
+    environment:
+      BTCPAY_HOST: ${DOMAIN_NAME}
+      BTCPAY_ROOTPATH: "/"
+      BTCPAY_PROTOCOL: "https"
+      NBITCOIN_NETWORK: ${NETWORK}
+      BTCPAY_LIGHTNING_ALIAS: ${ECLAIR_ALIAS}
+      BTCPAY_ECLAIR_API_URL: "http://eclair:8080"
+      BTCPAY_ECLAIR_API_PASSWORD: ${ECLAIR_API_PASSWORD}
+      BTCPAY_BITCOIN_RPC: "http://${BITCOIN_RPC_USER}:${BITCOIN_RPC_PASSWORD}@bitcoind:8332"
+      BTCPAY_BITCOIN_ZMQ_BLOCKS: "tcp://bitcoind:28332"
+      BTCPAY_BITCOIN_ZMQ_TXS: "tcp://bitcoind:28333"
+      # Database connection string
+      BTCPAY_DATABASE: "User ID=${POSTGRES_USER};Password=${POSTGRES_PASSWORD};Host=postgres;Port=5432;Database=${POSTGRES_DB};"
+      # NBXplorer URL
+      BTCPAY_NBXPLORER_NETWORK: ${NETWORK}
+      BTCPAY_NBXPLORER_URL: http://nbxplorer:32838/
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.btcpay.rule=Host(`${DOMAIN_NAME}`)"
+      - "traefik.http.routers.btcpay.entrypoints=websecure"
+      - "traefik.http.routers.btcpay.tls.certresolver=le"
+      - "traefik.http.services.btcpay.loadbalancer.server.port=80"
+
+  rtl:
+    image: shahanafarooqui/rtl:latest
+    container_name: rtl
+    restart: unless-stopped
+    depends_on:
+      - eclair
+      - traefik
+    networks:
+      - sovereign-net
+    volumes:
+      - ./config/rtl/rtl-config.json:/RTL/RTL-Config.json
+    environment:
+      RTL_PASSWORD: ${RTL_PASSWORD}
+      ECLAIR_API_PASSWORD: ${ECLAIR_API_PASSWORD}
+    command: >-
+      sh -c "sed -e 's#__RTL_PASSWORD__#'${RTL_PASSWORD}'#g' -e 's#__ECLAIR_API_PASSWORD__#'${ECLAIR_API_PASSWORD}'#g' /RTL/RTL-Config.json > /RTL/RTL-Config.rendered.json && mv /RTL/RTL-Config.rendered.json /RTL/RTL-Config.json && node rtl"
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.rtl.rule=Host(`rtl.${DOMAIN_NAME}`)"
+      - "traefik.http.routers.rtl.entrypoints=websecure"
+      - "traefik.http.routers.rtl.tls.certresolver=le"
+      - "traefik.http.services.rtl.loadbalancer.server.port=3000"
+
+networks:
+  sovereign-net:
+    driver: bridge
+
+volumes:
+  traefik_data:
+  bitcoin_data:
+  eclair_data:
+  electrs_data:
+  postgres_data:
+  btcpay_data:
